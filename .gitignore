@@ -1,2 +1,6 @@
 *.swp
 .DS_Store
+
+# tools/probe-language-server output — raw RPC responses, may contain the
+# account's project id and account-specific error text. Never commit these.
+probe-out/

@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Stand-in for the real `agy` binary, so tests never shell out to the network
+# or depend on the CLI being installed.
+#
+# Behaviour is driven by env vars set by tests/smoke:
+#   AGY_STUB_DIR    directory holding agy-usage.json / agy-credits.json
+#   AGY_STUB_FAIL   if "1", exit non-zero for /usage (signed-out / offline case)
+#   AGY_STUB_CREDITS_JSON  overrides the credits payload entirely
+set -uo pipefail
+
+slash=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  -p | --print | --prompt) slash="${2:-}"; shift ;;
+  esac
+  shift
+done
+
+case "$slash" in
+/usage)
+  [[ ${AGY_STUB_FAIL:-0} == 1 ]] && exit 1
+  cat "$AGY_STUB_DIR/agy-usage.json"
+  ;;
+/credits)
+  if [[ -n ${AGY_STUB_CREDITS_JSON:-} ]]; then
+    printf '%s\n' "$AGY_STUB_CREDITS_JSON"
+  else
+    cat "$AGY_STUB_DIR/agy-credits.json"
+  fi
+  ;;
+*)
+  echo "agy-stub: unexpected prompt '$slash'" >&2
+  exit 2
+  ;;
+esac

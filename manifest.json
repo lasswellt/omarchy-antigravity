@@ -2,24 +2,32 @@
   "schemaVersion": 1,
   "id": "lasswellt.antigravity",
   "name": "Antigravity",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Tom Lasswell",
-  "description": "Google Antigravity status in the Omarchy bar. Stub: no real data wired up yet.",
-  "homepage": "https://github.com/lasswellt/omarchy-antigravity",
   "license": "MIT",
+  "description": "Publishes Google Antigravity usage and limits to the Omarchy agents panel.",
+  "homepage": "https://github.com/lasswellt/omarchy-antigravity",
   "kinds": [
-    "bar-widget"
+    "service"
   ],
   "entryPoints": {
-    "barWidget": "Panel.qml"
+    "service": "Service.qml"
   },
-  "barWidget": {
-    "displayName": "Antigravity",
-    "description": "Google Antigravity status in the Omarchy bar. Stub: no real data wired up yet.",
-    "category": "AI",
-    "allowMultiple": false,
-    "defaultSection": "right",
-    "defaults": {},
-    "schema": []
+  "settings": {
+    "defaults": {
+      "refreshIntervalSec": 900
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 60,
+        "max": 3600,
+        "step": 60,
+        "defaultValue": 900,
+        "description": "How often to re-read Antigravity limits and local activity."
+      }
+    ]
   }
 }

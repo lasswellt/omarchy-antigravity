@@ -1,91 +1,234 @@
 #!/usr/bin/env bash
-# antigravity-usage: print one JSON record describing local Antigravity
-# activity, for the bar widget to call. See ../findings.md for how this
-# data was found and what it does and doesn't cover.
+# antigravity-usage: print one Omarchy agent usage record for Antigravity.
 #
-# Antigravity keeps its real state under ~/.gemini (shared with the Gemini
-# CLI, not Antigravity-specific), not under ~/.config/Antigravity. The only
-# part of that state this script reads is conversation_summaries.db, a
-# plain SQLite table with no reverse engineering required. Token counts and
-# per-step cost live in protobuf blobs in the per-conversation databases
-# with no shipped schema; this script does not attempt to read those (see
-# findings.md, "Out of scope / avoid").
+# Output is the record contract the Omarchy agents panel reads — see
+# roadmap.md §2. The plugin writes this to
+# ~/.local/state/omarchy/agents/usage/antigravity.json, where the built-in
+# panel picks it up by filename.
 #
-# ANTIGRAVITY_GEMINI_DIR overrides ~/.gemini, the same way Claude's
-# collector honors CLAUDE_CONFIG_DIR, so tests can point this at a fixture
-# directory instead of the real one.
+# Sources (roadmap.md §0):
+#   limits   `agy -p "/usage"   --output-format json`
+#   balance  `agy -p "/credits" --output-format json`
+#   stats    conversation_summaries.db, for BOTH the CLI and the IDE
+#
+# The two `agy` calls are free: slash commands expand in print mode without
+# reaching a model (num_turns 0, all-zero usage block), so this is safe to run
+# on a refresh timer.
+#
+# One record covers both surfaces deliberately. The CLI and the IDE keep
+# separate databases but share one account-wide quota, so reporting them as two
+# agents would draw the same limits twice.
+#
+# Environment overrides, for tests:
+#   ANTIGRAVITY_GEMINI_DIR  root holding antigravity/ and antigravity-cli/
+#                           (default ~/.gemini)
+#   ANTIGRAVITY_AGY         the agy binary to call (default: agy from PATH)
+#
+# Flags follow the omarchy-agent-usage-* convention:
+#   --force        no-op; agy exposes no cache knob to bypass
+#   --limits-only  no-op; the local scan is one indexed GROUP BY, nothing to skip
 
 set -uo pipefail
 
 gemini_dir="${ANTIGRAVITY_GEMINI_DIR:-$HOME/.gemini}"
-accounts_file="$gemini_dir/google_accounts.json"
-db="$gemini_dir/antigravity/conversation_summaries.db"
 
-fail_json() {
-  jq -n --arg error "$1" '{signedIn: false, error: $error}'
+# The installer puts agy in ~/.local/bin and adds it to PATH from .bashrc /
+# .bash_profile — neither of which a Quickshell-spawned process sources. Resolve
+# the binary here rather than inheriting whatever PATH the shell happens to have.
+agy_bin="${ANTIGRAVITY_AGY:-}"
+if [[ -z $agy_bin ]]; then
+  if command -v agy >/dev/null 2>&1; then
+    agy_bin=agy
+  elif [[ -x "$HOME/.local/bin/agy" ]]; then
+    agy_bin="$HOME/.local/bin/agy"
+  else
+    agy_bin=agy # resolves to "not installed" below, with the install hint
+  fi
+fi
+
+cli_db="$gemini_dir/antigravity-cli/conversation_summaries.db"
+ide_db="$gemini_dir/antigravity/conversation_summaries.db"
+
+for _arg in "$@"; do
+  case "$_arg" in
+  --force | --limits-only) ;;
+  *)
+    echo "antigravity-usage: unknown flag '$_arg'" >&2
+    exit 2
+    ;;
+  esac
+done
+
+# A collector that cannot produce a record still has to print one, or the panel
+# has nothing to show and no way to explain itself.
+bail() {
+  jq -n --arg status "$1" --arg help "$2" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{schemaVersion: 1, id: "antigravity", name: "Antigravity", updatedAt: $now,
+      ready: false, hasLocalStats: false, hasPromptStats: false,
+      todayPrompts: 0, todaySessions: 0, todayTotalTokens: 0, todayTokensByModel: {},
+      recentDays: [], totalPrompts: 0, totalSessions: 0, activeDays: 0,
+      activeDates: [], modelUsage: {}, limits: [], tierLabel: "",
+      usageStatusText: $status, authHelpText: $help}'
   exit 0
 }
 
-command -v sqlite3 >/dev/null || fail_json "sqlite3 not installed"
-command -v jq >/dev/null || { echo '{"signedIn": false, "error": "jq not installed"}'; exit 0; }
+command -v jq >/dev/null || {
+  echo '{"schemaVersion":1,"id":"antigravity","name":"Antigravity","ready":false,"usageStatusText":"jq not installed","limits":[]}'
+  exit 0
+}
+command -v sqlite3 >/dev/null || bail "sqlite3 not installed" "Install sqlite3 to read local Antigravity activity."
 
-account="null"
-if [[ -f $accounts_file ]]; then
-  account=$(jq -c '.active // null' "$accounts_file" 2>/dev/null) || account="null"
-fi
-
-[[ -f $db ]] || fail_json "no conversation_summaries.db found at $db"
-
-# All timestamps compared in UTC, 'now' taken once so the three counts are
-# consistent with each other even if the query takes a moment.
 now_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-rows_json=$(sqlite3 -json "$db" "
-  SELECT
-    conversation_id,
-    title,
-    step_count,
-    last_modified_time,
-    workspace_uris,
-    status,
-    agent_name
-  FROM conversation_summaries
-  ORDER BY last_modified_time DESC
-  LIMIT 5;
-" 2>/dev/null) || fail_json "failed to query $db"
-[[ -n $rows_json ]] || rows_json="[]"
+# ------------------------------------------------------------- local activity
 
-total=$(sqlite3 "$db" "SELECT count(*) FROM conversation_summaries;" 2>/dev/null || echo 0)
-today=$(sqlite3 "$db" "
-  SELECT count(*) FROM conversation_summaries
-  WHERE date(last_modified_time) = date('now');
-" 2>/dev/null || echo 0)
-last7=$(sqlite3 "$db" "
-  SELECT count(*) FROM conversation_summaries
-  WHERE julianday('now') - julianday(last_modified_time) <= 7;
-" 2>/dev/null || echo 0)
-last_active=$(sqlite3 "$db" "
-  SELECT last_modified_time FROM conversation_summaries
-  ORDER BY last_modified_time DESC LIMIT 1;
-" 2>/dev/null || echo "")
+# One row per local day, summed across whichever databases exist. `date()`
+# parses the stored `2026-09-18 20:02:07.202040507+00:00` form correctly;
+# 'localtime' is applied on both sides so "today" means the user's today.
+day_rows() {
+  local db="$1"
+  [[ -f $db ]] || return 0
+  sqlite3 -json "$db" "
+    SELECT date(last_modified_time, 'localtime') AS date,
+           count(*)                              AS sessions,
+           coalesce(sum(step_count), 0)          AS steps
+    FROM conversation_summaries
+    WHERE last_modified_time IS NOT NULL
+    GROUP BY 1;
+  " 2>/dev/null || true
+}
 
+days_cli=$(day_rows "$cli_db"); [[ -n $days_cli ]] || days_cli="[]"
+days_ide=$(day_rows "$ide_db"); [[ -n $days_ide ]] || days_ide="[]"
+
+has_local=false
+[[ -f $cli_db || -f $ide_db ]] && has_local=true
+
+today=$(date +%Y-%m-%d)
+# The last 7 local days, oldest first, so quiet days still get a row.
+week=$(for i in 6 5 4 3 2 1 0; do date -d "$i days ago" +%Y-%m-%d; done | jq -R . | jq -sc .)
+
+stats=$(jq -n \
+  --argjson cli "$days_cli" --argjson ide "$days_ide" \
+  --arg today "$today" --argjson week "$week" '
+  ($cli + $ide)
+  | map(select(.date != null))
+  | group_by(.date)
+  | map({date: .[0].date,
+         sessions: (map(.sessions // 0) | add),
+         steps:    (map(.steps    // 0) | add)})
+  | sort_by(.date) as $days
+  | ($days | map(select(.sessions > 0) | .date))            as $activeDates
+  | ($days | map(select(.date == $today)) | first)          as $todayRow
+  | {
+      totalSessions: ($days | map(.sessions) | add // 0),
+      activeDates:   $activeDates,
+      activeDays:    ($activeDates | length),
+      todaySessions: ($todayRow.sessions // 0),
+      recentDays: ($week | map(. as $d
+                     | ($days | map(select(.date == $d)) | first) as $row
+                     | {date: $d, messageCount: ($row.steps // 0)}))
+    }')
+
+# --------------------------------------------------------------------- limits
+
+status_text=""
+auth_help=""
+retry_advised=false
+limits="[]"
+balance="null"
+
+agy_call() {
+  # Prints the `.command.data` payload, or nothing on any failure.
+  local slash="$1" out
+  out=$(timeout 45 "$agy_bin" -p "/$slash" --output-format json 2>/dev/null) || return 1
+  jq -e --arg s "$slash" \
+    'select(.status == "SUCCESS") | .command | select(.name == $s) | .data' \
+    <<<"$out" 2>/dev/null
+}
+
+if ! command -v "$agy_bin" >/dev/null 2>&1; then
+  auth_help="Install the Antigravity CLI to see limits: curl -fsSL https://antigravity.google/cli/install.sh | bash"
+  $has_local || bail "Antigravity CLI not installed" "$auth_help"
+else
+  if usage_data=$(agy_call usage) && [[ -n $usage_data ]]; then
+    # Percent is the fraction *used*, which is how the panel's meters read;
+    # agy reports what is left. Group names are trimmed for the narrow label
+    # column ("Gemini Models" -> "Gemini", "Claude and GPT models" -> "Claude & GPT").
+    limits=$(jq -c '
+      [ .groups[]?
+        | (.name // "" | sub("[ ]+[Mm]odels$"; "") | gsub(" and "; " & ")) as $group
+        | .buckets[]?
+        | select((.disabled // false) | not)
+        | select(.remaining_fraction != null)
+        | { label: ($group
+                    + " · "
+                    + (if   .window == "weekly" then "Weekly"
+                       elif .window == "5h"     then "5-hour"
+                       else (.name // .window // "Limit") end)),
+            percent: ((1 - .remaining_fraction) | if . < 0 then 0 elif . > 1 then 1 else . end),
+            resetsAt: (.reset_time // "") } ]' <<<"$usage_data" 2>/dev/null) || limits="[]"
+    [[ -n $limits ]] || limits="[]"
+  else
+    # Most likely signed out or offline. Say so, and ask for one early retry
+    # rather than sitting stale until the next full refresh.
+    status_text="Antigravity limits unavailable"
+    auth_help="Run \`agy\` once to sign in, then reopen this panel."
+    retry_advised=true
+  fi
+
+  # Only report a ledger when there is actually credit. A zero balance would
+  # satisfy providerHasData() and pin the tab open on machines that have none.
+  if credits_data=$(agy_call credits) && [[ -n $credits_data ]]; then
+    balance=$(jq -c '
+      (.remaining_credits // 0) as $r
+      | if $r > 0
+        then {remaining: $r, funded: 0, spent: 0, currency: "credits", estimated: false}
+        else null end' <<<"$credits_data" 2>/dev/null) || balance="null"
+    [[ -n $balance ]] || balance="null"
+  fi
+fi
+
+# --------------------------------------------------------------------- record
+
+# Token totals stay zero: agy reports usage per run, in the envelope of each
+# print-mode call, with no cumulative store to read. hasPromptStats is false
+# because conversation_summaries counts sessions and steps, never prompts.
 jq -n \
-  --argjson account "$account" \
-  --argjson total "${total:-0}" \
-  --argjson today "${today:-0}" \
-  --argjson last7 "${last7:-0}" \
-  --arg lastActive "$last_active" \
-  --argjson recent "$rows_json" \
-  --arg generatedAt "$now_utc" \
+  --argjson stats "$stats" \
+  --argjson limits "$limits" \
+  --argjson balance "$balance" \
+  --argjson hasLocal "$has_local" \
+  --argjson retry "$retry_advised" \
+  --arg status "$status_text" \
+  --arg help "$auth_help" \
+  --arg now "$now_utc" \
   '{
-    signedIn: ($account != null),
-    account: $account,
-    generatedAt: $generatedAt,
-    conversations: {
-      total: $total,
-      today: $today,
-      last7Days: $last7
-    },
-    lastActive: (if $lastActive == "" then null else $lastActive end),
-    recent: $recent
-  }'
+    schemaVersion: 1,
+    id: "antigravity",
+    name: "Antigravity",
+    updatedAt: $now,
+    ready: (($limits | length) > 0 or $hasLocal),
+    hasLocalStats: $hasLocal,
+    hasPromptStats: false,
+
+    todayPrompts: 0,
+    todaySessions: $stats.todaySessions,
+    todayTotalTokens: 0,
+    todayTokensByModel: {},
+
+    recentDays: $stats.recentDays,
+
+    totalPrompts: 0,
+    totalSessions: $stats.totalSessions,
+    activeDays: $stats.activeDays,
+    activeDates: $stats.activeDates,
+    modelUsage: {},
+
+    limits: $limits,
+    tierLabel: "",
+    usageStatusText: $status,
+    authHelpText: $help
+  }
+  + (if $balance == null then {} else {balance: $balance} end)
+  + (if $retry then {retryAdvised: true} else {} end)'

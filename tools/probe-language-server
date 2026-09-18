@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+# probe-language-server: call Antigravity's local language server and dump the
+# responses the collector will eventually be built on.
+#
+# Antigravity's Go backend serves its RPCs with connectrpc.com/connect, and
+# Connect's unary protocol is a plain HTTP/1.1 POST with a JSON body — so this
+# needs nothing but curl and jq. No protobuf encoding, no grpcurl, no
+# descriptor set. (The server also speaks application/grpc, grpc-web and
+# connect+proto on the same port; JSON is simply the easiest to read.)
+#
+# The server only listens while Antigravity is actually running, and it picks a
+# fresh random port every launch, so this rediscovers the port each time from
+# the log.
+#
+# Usage:
+#   tools/probe-language-server [--force-refresh] [--redact] [--port N] [--days N]
+#
+# Writes one .json per RPC into ./probe-out/ (override with PROBE_OUT).
+#
+# PRIVACY: raw responses can carry your account's project id, location and
+# error strings naming your account. --redact scrubs the known identifier
+# fields from the *printed* output; the files on disk are always raw. Skim
+# before pasting anywhere.
+
+set -uo pipefail
+
+LOG="${ANTIGRAVITY_LOG:-$HOME/.config/Antigravity/logs/language_server.log}"
+OUT="${PROBE_OUT:-probe-out}"
+SERVICE="exa.language_server_pb.LanguageServerService"
+
+force_refresh=false
+redact=false
+port=""
+days=7
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  --force-refresh) force_refresh=true ;;
+  --redact) redact=true ;;
+  --port) port="${2:-}"; shift ;;
+  --days) days="${2:-7}"; shift ;;
+  -h | --help)
+    sed -n '2,26p' "$0" | sed 's/^# \?//'
+    exit 0
+    ;;
+  *)
+    echo "probe: unknown argument '$1' (try --help)" >&2
+    exit 2
+    ;;
+  esac
+  shift
+done
+
+die() {
+  echo "probe: $*" >&2
+  exit 1
+}
+
+for tool in curl jq; do
+  command -v "$tool" >/dev/null || die "$tool is required but not installed"
+done
+
+# ---------------------------------------------------------------- discovery
+
+# "Language server listening on random port at 38149 for HTTP". Take the last
+# match: the log accumulates across launches and only the newest is live.
+discover_port() {
+  [[ -f $LOG ]] || die "no language server log at $LOG — has Antigravity ever run?"
+  grep -oE 'listening on random port at [0-9]+ for HTTP$' "$LOG" 2>/dev/null |
+    grep -oE '[0-9]+' | tail -1
+}
+
+if [[ -z $port ]]; then
+  port=$(discover_port)
+  [[ -n $port ]] || die "could not find an HTTP port in $LOG (looked for 'listening on random port at N for HTTP')"
+  echo "probe: discovered HTTP port $port from the log"
+else
+  echo "probe: using port $port (given)"
+fi
+
+# The port in the log is only meaningful if that process is still alive.
+if ! timeout 2 bash -c "</dev/tcp/127.0.0.1/$port" 2>/dev/null; then
+  echo "probe: nothing is listening on 127.0.0.1:$port" >&2
+  echo >&2
+  if ! pgrep -f '/opt/Antigravity' >/dev/null 2>&1; then
+    echo "  Antigravity does not appear to be running. The language server only" >&2
+    echo "  listens while the IDE is open, and it takes a new random port each" >&2
+    echo "  launch. Start Antigravity, sign in, then re-run this." >&2
+  else
+    echo "  Antigravity is running but the logged port is stale. It may still be" >&2
+    echo "  starting up — wait a moment and re-run, or pass --port explicitly." >&2
+  fi
+  exit 1
+fi
+
+mkdir -p "$OUT"
+
+# ------------------------------------------------------------------- calling
+
+# Connect unary: POST /<pkg>.<Service>/<Method>, JSON in, JSON out. Field names
+# follow protojson, i.e. lowerCamelCase of the proto field names.
+call() {
+  local method="$1" body="$2" file="$OUT/$1.json"
+  local http tmp
+  tmp=$(mktemp)
+
+  http=$(curl -sS -o "$tmp" -w '%{http_code}' \
+    --max-time 20 \
+    -X POST \
+    -H 'Content-Type: application/json' \
+    -H 'Connect-Protocol-Version: 1' \
+    --data "$body" \
+    "http://127.0.0.1:$port/$SERVICE/$method" 2>"$tmp.err")
+  local curl_status=$?
+
+  printf '\n=== %s ===\n' "$method"
+  printf 'request: %s\n' "$body"
+
+  if (( curl_status != 0 )); then
+    echo "transport error: $(tr -d '\n' <"$tmp.err")"
+    rm -f "$tmp" "$tmp.err"
+    return 1
+  fi
+
+  mv "$tmp" "$file"
+  rm -f "$tmp.err"
+
+  if [[ $http == 200 ]]; then
+    echo "http $http -> $file"
+  else
+    # Connect reports errors as a JSON body with code/message, not just a status.
+    echo "http $http (Connect error) -> $file"
+  fi
+
+  if jq -e . "$file" >/dev/null 2>&1; then
+    if $redact; then
+      jq '(.. | objects | select(has("projectId")).projectId) |= "<redacted>"
+          | (.. | objects | select(has("location")).location) |= "<redacted>"
+          | (.. | objects | select(has("wifProvider")).wifProvider) |= "<redacted>"' "$file"
+    else
+      jq . "$file"
+    fi
+  else
+    echo "(response was not JSON — first 400 bytes)"
+    head -c 400 "$file"
+    echo
+  fi
+}
+
+start=$(date -u -d "$days days ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) ||
+  die "this script needs GNU date for --days arithmetic"
+end=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+tz=$(timedatectl show -p Timezone --value 2>/dev/null || echo UTC)
+
+echo "probe: service $SERVICE"
+echo "probe: analytics window $start .. $end ($tz)"
+
+# 1. Is the IDE actually signed in? AuthResult.has_valid_auth is the
+#    authoritative answer; ui_message is a ready-made string for the panel.
+call GetAuthStatus '{}'
+
+# 2. Cheaper sibling — token present, plus project/location context.
+call HasAuthToken '{}'
+
+# 3. The limits meter. The local request wraps the Cloud Code one:
+#    { request: <v1internal.RetrieveUserQuotaSummaryRequest>, force_refresh: bool }
+if $force_refresh; then
+  call RetrieveUserQuotaSummary '{"request":{},"forceRefresh":true}'
+else
+  call RetrieveUserQuotaSummary '{"request":{}}'
+fi
+
+# 4. Activity stats: completions_by_day, chats_by_model, active_developer_days.
+#    Note there are no token counts in this response — see roadmap.md §3a.
+call GetUserAnalyticsSummary "$(jq -nc \
+  --arg tz "$tz" --arg s "$start" --arg e "$end" \
+  '{timeZone: $tz, startTimestamp: $s, endTimestamp: $e}')"
+
+cat <<EOF
+
+---
+Raw responses in $OUT/. These may contain your project id and account-specific
+error text — skim before sharing (or re-run with --redact for a scrubbed view).
+
+What to look for:
+  GetAuthStatus            authResult.hasValidAuth, authResult.uiMessage
+  RetrieveUserQuotaSummary buckets[].displayName / remainingFraction /
+                           resetTime / window / disabled, and whether numbers
+                           arrive as remainingFraction or remainingAmount
+  GetUserAnalyticsSummary  completionsByDay[], chatsByModel[] (real model ids),
+                           completionStatistics.activeDeveloperDays
+
+If a call returns a Connect error about missing metadata or auth, note the
+exact code/message — that tells us what the collector has to send.
+EOF

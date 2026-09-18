@@ -1,56 +1,183 @@
 #!/usr/bin/env bash
-# Smoke test for bin/antigravity-usage against a fixture DB. No network, no
-# real conversation content, never touches the user's actual ~/.gemini.
-set -euo pipefail
+# Tests for bin/antigravity-usage. No network, no real conversation content,
+# never touches the user's actual ~/.gemini — the databases are built from
+# tests/fixtures and `agy` is replaced by tests/fixtures/agy-stub.
+set -uo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SCRIPT="$ROOT/bin/antigravity-usage"
-FIXTURE_SQL="$ROOT/tests/fixtures/conversation_summaries.sql"
+FIXTURES="$ROOT/tests/fixtures"
+FIXTURE_SQL="$FIXTURES/conversation_summaries.sql"
+STUB="$FIXTURES/agy-stub"
 
 TEST_TMP=$(mktemp -d)
 trap 'rm -rf -- "$TEST_TMP"' EXIT
 
-fail() {
-  printf 'FAIL: %s\n' "$*" >&2
-  exit 1
+export AGY_STUB_DIR="$FIXTURES"
+
+failures=0
+checks=0
+
+check() {
+  local desc="$1" expected="$2" actual="$3"
+  checks=$((checks + 1))
+  if [[ $expected != "$actual" ]]; then
+    printf 'FAIL: %s\n      expected: %s\n      actual:   %s\n' "$desc" "$expected" "$actual" >&2
+    failures=$((failures + 1))
+  fi
 }
 
-# --- signed out / no db -----------------------------------------------------
+# A collector whose output is not valid JSON breaks the panel silently, so
+# every scenario below runs through this first.
+run() {
+  local out
+  out=$("$@" 2>/dev/null)
+  if ! jq -e . >/dev/null 2>&1 <<<"$out"; then
+    printf 'FAIL: collector did not emit valid JSON\n      output: %s\n' "$out" >&2
+    failures=$((failures + 1))
+    echo '{}'
+    return
+  fi
+  printf '%s' "$out"
+}
 
-empty_dir="$TEST_TMP/empty"
-mkdir -p "$empty_dir"
-out=$(ANTIGRAVITY_GEMINI_DIR="$empty_dir" "$SCRIPT")
-signed_in=$(jq -r '.signedIn' <<<"$out")
-[[ $signed_in == "false" ]] || fail "expected signedIn=false with no db, got: $out"
+make_db() {
+  local dir="$1"
+  mkdir -p "$dir"
+  sqlite3 "$dir/conversation_summaries.db" <"$FIXTURE_SQL"
+}
 
-# --- populated fixture -------------------------------------------------------
+# --- nothing installed, nothing on disk --------------------------------------
 
-gemini_dir="$TEST_TMP/gemini"
-mkdir -p "$gemini_dir/antigravity"
-echo '{"active": "fixture@example.com", "old": []}' >"$gemini_dir/google_accounts.json"
-sqlite3 "$gemini_dir/antigravity/conversation_summaries.db" <"$FIXTURE_SQL"
+empty="$TEST_TMP/empty"
+mkdir -p "$empty"
+out=$(run env ANTIGRAVITY_GEMINI_DIR="$empty" ANTIGRAVITY_AGY="$TEST_TMP/nonexistent-agy" "$SCRIPT")
+check "no data: ready=false"      "false"       "$(jq -r '.ready' <<<"$out")"
+check "no data: id"               "antigravity" "$(jq -r '.id' <<<"$out")"
+check "no data: schemaVersion"    "1"           "$(jq -r '.schemaVersion' <<<"$out")"
+check "no data: no limits"        "0"           "$(jq -r '.limits | length' <<<"$out")"
+check "no data: install hint"     "true"        "$(jq -r '(.authHelpText | test("install.sh")) ' <<<"$out")"
 
-out=$(ANTIGRAVITY_GEMINI_DIR="$gemini_dir" "$SCRIPT")
+# Nothing to show must also mean nothing drawn: the panel's providerHasData()
+# gate keys off exactly these fields.
+has_data=$(jq -r '(.totalPrompts > 0) or (.totalSessions > 0) or (.activeDays > 0)
+                  or (.todayPrompts > 0) or (.todaySessions > 0)
+                  or ((.limits | length) > 0) or (has("balance"))' <<<"$out")
+check "no data: stays out of the bar" "false" "$has_data"
 
-signed_in=$(jq -r '.signedIn' <<<"$out")
-[[ $signed_in == "true" ]] || fail "expected signedIn=true, got: $out"
+# --- CLI database + working agy ----------------------------------------------
 
-account=$(jq -r '.account' <<<"$out")
-[[ $account == "fixture@example.com" ]] || fail "expected fixture account, got: $account"
+gem="$TEST_TMP/gemini"
+make_db "$gem/antigravity-cli"
+out=$(run env ANTIGRAVITY_GEMINI_DIR="$gem" ANTIGRAVITY_AGY="$STUB" "$SCRIPT")
 
-total=$(jq -r '.conversations.total' <<<"$out")
-[[ $total == "4" ]] || fail "expected 4 total conversations, got: $total"
+check "cli: ready"             "true" "$(jq -r '.ready' <<<"$out")"
+check "cli: hasLocalStats"     "true" "$(jq -r '.hasLocalStats' <<<"$out")"
+check "cli: hasPromptStats"    "false" "$(jq -r '.hasPromptStats' <<<"$out")"
+check "cli: totalSessions"     "4"    "$(jq -r '.totalSessions' <<<"$out")"
+check "cli: todaySessions"     "2"    "$(jq -r '.todaySessions' <<<"$out")"
+check "cli: activeDays"        "3"    "$(jq -r '.activeDays' <<<"$out")"
+check "cli: recentDays is 7"   "7"    "$(jq -r '.recentDays | length' <<<"$out")"
+check "cli: today steps"       "17"   "$(jq -r '.recentDays[-1].messageCount' <<<"$out")"
+check "cli: no stale error"    ""     "$(jq -r '.usageStatusText' <<<"$out")"
+check "cli: no retry asked"    "false" "$(jq -r 'has("retryAdvised")' <<<"$out")"
 
-today=$(jq -r '.conversations.today' <<<"$out")
-[[ $today == "2" ]] || fail "expected 2 conversations today, got: $today"
+# recentDays must be oldest-first and contiguous, or the panel's weekly chart
+# draws days in the wrong order.
+check "cli: recentDays sorted" "true" \
+  "$(jq -r '[.recentDays[].date] | . == (sort)' <<<"$out")"
+check "cli: recentDays ends today" "$(date +%Y-%m-%d)" \
+  "$(jq -r '.recentDays[-1].date' <<<"$out")"
 
-last7=$(jq -r '.conversations.last7Days' <<<"$out")
-[[ $last7 == "3" ]] || fail "expected 3 conversations in the last 7 days, got: $last7"
+# --- limits, derived from a real captured envelope ---------------------------
 
-recent_count=$(jq -r '.recent | length' <<<"$out")
-[[ $recent_count == "4" ]] || fail "expected 4 recent rows (fixture has only 4), got: $recent_count"
+check "limits: four buckets"   "4" "$(jq -r '.limits | length' <<<"$out")"
+check "limits: labels" \
+  "Gemini · Weekly,Gemini · 5-hour,Claude & GPT · Weekly,Claude & GPT · 5-hour" \
+  "$(jq -r '[.limits[].label] | join(",")' <<<"$out")"
+# percent is the fraction USED; agy reports what is left.
+check "limits: percent in range" "true" \
+  "$(jq -r '[.limits[] | .percent >= 0 and .percent <= 1] | all' <<<"$out")"
+check "limits: percent inverts remaining_fraction" "true" \
+  "$(jq -n --slurpfile env "$FIXTURES/agy-usage.json" --argjson rec "$out" '
+     ($env[0].command.data.groups[0].buckets[0].remaining_fraction) as $rf
+     | (($rec.limits[0].percent - (1 - $rf)) | fabs) < 0.000001')"
+check "limits: resetsAt present" "true" \
+  "$(jq -r '[.limits[] | .resetsAt | test("^[0-9]{4}-")] | all' <<<"$out")"
 
-most_recent_title=$(jq -r '.recent[0].title' <<<"$out")
-[[ $most_recent_title == "Fix the build" ]] || fail "expected most recent conversation first, got: $most_recent_title"
+# --- the envelope contract -----------------------------------------------------
+# The whole limits path depends on slash commands expanding in print mode and
+# returning this exact envelope. If agy changes it, fail here and loudly,
+# rather than silently shipping a record with no limits.
 
-printf 'ok  all antigravity-usage smoke checks passed\n'
+env_ok=$(jq -r '
+  (.status == "SUCCESS")
+  and (.command.name == "usage")
+  and (.command.data.groups | type == "array")
+  and (.command.data.groups[0].buckets | type == "array")
+  and (.command.data.groups[0].buckets[0] | has("remaining_fraction") and has("reset_time") and has("window"))
+' "$FIXTURES/agy-usage.json")
+check "envelope: agy /usage shape unchanged" "true" "$env_ok"
+
+cred_ok=$(jq -r '(.status == "SUCCESS") and (.command.name == "credits")
+                 and (.command.data | has("remaining_credits"))' "$FIXTURES/agy-credits.json")
+check "envelope: agy /credits shape unchanged" "true" "$cred_ok"
+
+# --- merging the CLI and the IDE ---------------------------------------------
+
+both="$TEST_TMP/both"
+make_db "$both/antigravity-cli"
+make_db "$both/antigravity"
+out=$(run env ANTIGRAVITY_GEMINI_DIR="$both" ANTIGRAVITY_AGY="$STUB" "$SCRIPT")
+check "merge: sessions summed"   "8"  "$(jq -r '.totalSessions' <<<"$out")"
+check "merge: today summed"      "4"  "$(jq -r '.todaySessions' <<<"$out")"
+check "merge: activeDays unioned" "3" "$(jq -r '.activeDays' <<<"$out")"
+check "merge: limits not doubled" "4" "$(jq -r '.limits | length' <<<"$out")"
+
+# --- agy present but failing (signed out / offline) --------------------------
+
+out=$(run env ANTIGRAVITY_GEMINI_DIR="$gem" ANTIGRAVITY_AGY="$STUB" AGY_STUB_FAIL=1 "$SCRIPT")
+check "signed out: still ready on local stats" "true" "$(jq -r '.ready' <<<"$out")"
+check "signed out: no limits"     "0"    "$(jq -r '.limits | length' <<<"$out")"
+check "signed out: says so"       "true" "$(jq -r '.usageStatusText != ""' <<<"$out")"
+check "signed out: asks retry"    "true" "$(jq -r '.retryAdvised' <<<"$out")"
+check "signed out: keeps stats"   "4"    "$(jq -r '.totalSessions' <<<"$out")"
+
+# --- balance only when there is credit ---------------------------------------
+
+check "credits: zero omits balance" "false" \
+  "$(jq -r 'has("balance")' <<<"$(run env ANTIGRAVITY_GEMINI_DIR="$gem" ANTIGRAVITY_AGY="$STUB" "$SCRIPT")")"
+
+paid='{"status":"SUCCESS","command":{"name":"credits","data":{"remaining_credits":42,"upgrade_uri":"x"}}}'
+out=$(run env ANTIGRAVITY_GEMINI_DIR="$gem" ANTIGRAVITY_AGY="$STUB" AGY_STUB_CREDITS_JSON="$paid" "$SCRIPT")
+check "credits: positive emits balance" "42" "$(jq -r '.balance.remaining' <<<"$out")"
+# balanceValue() in the panel requires these keys to survive Number() coercion.
+check "credits: balance shape" "true" \
+  "$(jq -r '.balance | has("remaining") and has("funded") and has("spent") and has("currency") and has("estimated")' <<<"$out")"
+
+# --- flags accepted -----------------------------------------------------------
+
+for flag in --force --limits-only; do
+  out=$(run env ANTIGRAVITY_GEMINI_DIR="$gem" ANTIGRAVITY_AGY="$STUB" "$SCRIPT" "$flag")
+  check "flag $flag accepted" "antigravity" "$(jq -r '.id' <<<"$out")"
+done
+
+"$SCRIPT" --nonsense >/dev/null 2>&1
+check "unknown flag rejected" "2" "$?"
+
+# --- a corrupt database must not take the record down -------------------------
+
+broken="$TEST_TMP/broken"
+mkdir -p "$broken/antigravity-cli"
+printf 'this is not a database' >"$broken/antigravity-cli/conversation_summaries.db"
+out=$(run env ANTIGRAVITY_GEMINI_DIR="$broken" ANTIGRAVITY_AGY="$STUB" "$SCRIPT")
+check "corrupt db: still valid JSON" "antigravity" "$(jq -r '.id' <<<"$out")"
+check "corrupt db: zero sessions"    "0"           "$(jq -r '.totalSessions' <<<"$out")"
+
+# -----------------------------------------------------------------------------
+
+if (( failures > 0 )); then
+  printf '\n%d of %d checks failed\n' "$failures" "$checks" >&2
+  exit 1
+fi
+printf 'ok  %d antigravity-usage checks passed\n' "$checks"

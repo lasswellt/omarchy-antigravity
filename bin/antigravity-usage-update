@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# antigravity-usage-update: run the collector and publish its record where the
+# Omarchy agents panel looks for it.
+#
+# Mirrors omarchy-agent-usage-update: validate the JSON, then rename it into
+# place so a reader never sees a half-written file. The panel discovers agents
+# by listing *.json in this directory, so the filename is the agent id — see
+# roadmap.md §1.
+#
+# The first-party updater only runs collectors it finds in $OMARCHY_PATH/bin,
+# so it will never run ours; it also never deletes a record it did not write,
+# which is why publishing here from outside is safe.
+#
+# Flags are passed through to the collector (--force, --limits-only).
+
+set -uo pipefail
+
+USAGE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agents/usage"
+AGENT_ID="antigravity"
+
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+collector="$here/antigravity-usage"
+
+[[ -x $collector ]] || {
+  echo "antigravity-usage-update: collector not found at $collector" >&2
+  exit 1
+}
+
+mkdir -p "$USAGE_DIR" || {
+  echo "antigravity-usage-update: cannot create $USAGE_DIR" >&2
+  exit 1
+}
+
+record=$("$collector" "$@")
+if [[ -z $record ]] || ! jq -e . >/dev/null 2>&1 <<<"$record"; then
+  echo "antigravity-usage-update: collector produced no valid JSON" >&2
+  exit 1
+fi
+
+tmp=$(mktemp "$USAGE_DIR/.$AGENT_ID.XXXXXX") || exit 1
+trap 'rm -f -- "$tmp"' EXIT
+printf '%s\n' "$record" >"$tmp" || exit 1
+mv "$tmp" "$USAGE_DIR/$AGENT_ID.json" || exit 1
+trap - EXIT

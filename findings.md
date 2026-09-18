@@ -4,6 +4,11 @@ Research notes from building the dev scaffold, before any real widget logic
 was written. Read this first in a fresh session — it's the reason the
 project is shaped the way it is.
 
+> **Superseded in four places (2026-09-18).** A second research pass overturned
+> the conclusions about the Agents plugin, the quota API, the protobuf blobs,
+> and sign-in detection. Corrections are marked **CORRECTION** inline below;
+> [`roadmap.md`](roadmap.md) has the evidence and what to build next.
+
 ## Goal
 
 An [Omarchy](https://omarchy.org) bar widget for Google Antigravity
@@ -21,6 +26,15 @@ install). Antigravity is also not really "a CLI coding agent" the way
 Claude/Codex are — it's a GUI IDE — so a separate, standalone plugin
 (`lasswellt.antigravity`) is the right shape, installed the normal
 third-party way via `omarchy plugin add`.
+
+> **CORRECTION.** The provider list is not a gate. Those `manifest.json`
+> entries only control *enablement*, and `Main.qml:212-215` defaults unknown
+> ids to enabled. The panel discovers agents by listing `*.json` in
+> `~/.local/state/omarchy/agents/usage/` — the filename is the id. Dropping an
+> `antigravity.json` there gets a full tab in the built-in panel, tested and
+> confirmed. A standalone plugin may still be the right shape, but it's now a
+> choice rather than a constraint, and the two aren't exclusive. See
+> `roadmap.md` §1.
 
 ## What's installed
 
@@ -62,6 +76,13 @@ Two separate locations:
     counts / model names / per-step cost would presumably live, but reading
     them means reverse-engineering an undocumented, versioned wire format.
     Treat as **not accessible** until/unless someone does that RE work.
+    **CORRECTION:** the schemas *are* shipped — Go embeds a
+    `FileDescriptorProto` for every message, and 628 `.proto` names are
+    recoverable from the `language_server` binary, including
+    `jetski/product_api_pb/v1/conversation.proto` and
+    `gemini_coder/proto/trajectory.proto`. Decoding is now possible. It stays
+    last on the list for the maintenance reasons below, not because it's
+    blocked. See `roadmap.md` §4.
   - `antigravity/antigravity_state.pbtxt` — another protobuf (text-format
     this time). Didn't investigate contents yet.
   - `antigravity/crashes/` — crash logs, empty in our sessions (clean
@@ -129,21 +150,29 @@ There's an explicit tier concept in the auth code:
 
 This is the closest analog to Claude's "Max 20x" / "Pro" plan label. **In
 both test sessions so far it came back empty** — never observed a populated
-value. Unconfirmed whether:
+value.
 
-- it populates after a longer/warmer session,
-- Code Assist exposes any numeric quota/rate-limit data at all (Claude Code
-  has a documented-enough OAuth usage endpoint; nothing equivalent has been
-  found here yet), or
-- it's only ever a plan *name*, no percentage/limit meter like Claude's.
-
-**Before building a quota meter, re-check this field after a longer signed-in
-session**, and grep `language_server.log` for `SetUserTier` again — if it's
-still always empty, a Claude-style limits meter is probably not buildable
-and the widget should stick to activity stats + a static "signed in as
-X" line.
+> **CORRECTION.** The empty tier has a mundane cause: Antigravity was never
+> signed in. The same log carries `You are not logged into Antigravity` 91
+> times. `~/.gemini/oauth_creds.json` and `google_accounts.json` belong to the
+> **Gemini CLI**, which is signed in separately — so the IDE being signed out
+> is invisible from those files. `SetUserTier("")` is just what an
+> unauthenticated session looks like. Still needs a signed-in re-check.
+>
+> A quota API also exists, contrary to "nothing equivalent has been found":
+> `PredictionService.RetrieveUserQuotaSummary`
+> (`POST /v1internal:retrieveUserQuotaSummary`), with `buckets` / `groups` /
+> `description` and a nested `BucketInfo`. Better still, the **local**
+> language server proxies the same RPC on a random localhost port it announces
+> at startup — so a collector can read limits without ever touching the user's
+> OAuth token. See `roadmap.md` §3.
 
 ## Scope recommendation
+
+> **CORRECTION.** Items 2 and 3 below are no longer blocked — see the
+> corrections above. `roadmap.md` §7 has the revised order of work. The one
+> genuine blocker left is that nobody has signed into Antigravity yet, which
+> gates the tier label, the quota shape, and sign-in detection alike.
 
 1. **Buildable now, high confidence:** an activity tab reading
    `conversation_summaries.db` directly (session counts, last active,
@@ -203,6 +232,12 @@ the second half yet — see "Auth / tier signal" above.
 
 ## Next steps (for the new session)
 
+**Superseded by [`roadmap.md`](roadmap.md) §7.** Step 4 below is done
+(`tests/smoke` + fixtures). Steps 1–3 still stand but in a changed order and
+against a different output format — the collector should print the Agents
+record contract (`roadmap.md` §2) rather than a bespoke shape, and
+`bin/antigravity-usage` has a sign-in bug to fix first (`roadmap.md` §6).
+
 1. Re-check `SetUserTier` after a real signed-in-and-working session (see
    "Auth / tier signal") to settle whether a quota meter is possible at all.
 2. Implement `bin/antigravity-usage` fully against
@@ -210,6 +245,4 @@ the second half yet — see "Auth / tier signal" above.
 3. Wire `Panel.qml` to spawn that script (Quickshell `Process`, same pattern
    as Tesla's `bin/tesla`) and render real content instead of the "AG"
    placeholder.
-4. Add `tests/` fixtures (a tiny fixture SQLite DB with fake rows, no real
-   conversation content) so the collector's SQL logic is tested without
-   touching the user's real database.
+4. ~~Add `tests/` fixtures~~ — done.
