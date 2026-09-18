@@ -31,13 +31,26 @@ research pass overturned. This README is just structure and the dev loop.
   that fails loudly if `agy`'s JSON envelope changes shape, since the whole
   limits path rests on slash commands expanding in print mode.
 
-- **Next:** have the plugin write that record to
-  `~/.local/state/omarchy/agents/usage/antigravity.json` on a timer. The
-  built-in Agents panel adopts it by filename, so Antigravity appears
-  alongside Claude and Codex with no UI work (`roadmap.md` §1).
+- **The plugin is a headless `service`**, not a bar widget.
+  `AntigravityService.qml` runs `bin/antigravity-usage-update` on a timer
+  (default 900s, `triggeredOnStart`), publishing the record to
+  `~/.local/state/omarchy/agents/usage/antigravity.json`. The built-in Agents
+  panel discovers it by filename, so **Antigravity shows up in that panel next
+  to Claude and Codex** — no UI of our own, no second bar icon.
 
-- `Panel.qml` still renders a placeholder "AG" bar icon — the standalone
-  panel comes after the collector is wired up.
+  Force a refresh:
+  ```bash
+  omarchy-shell lasswellt.antigravity refresh   # or: bin/antigravity-usage-update
+  ```
+
+- **Known cosmetic gap:** the Agents panel looks for its mark at
+  `$OMARCHY_PATH/shell/plugins/agents/assets/antigravity.svg`, which is
+  root-owned and not ours to write, so the shell logs one
+  `Cannot open: …/antigravity.svg` warning per draw and falls back to the bar
+  glyph. Harmless.
+
+- `Panel.qml` is no longer an entry point. It's kept for the standalone panel
+  in `roadmap.md` §5.
 
 ## Layout
 
@@ -72,9 +85,18 @@ git add -A && git commit -m "..."
 omarchy plugin update lasswellt.antigravity --yes # pushes the change live
 ```
 
-The running shell hot-reloads on `plugin update`; check
-`journalctl --user _PID=$(pgrep -x quickshell)` afterward for QML errors if
-the bar icon doesn't look right.
+Check `journalctl --user _PID=$(pgrep -x quickshell)` afterward for QML errors.
+
+Two things that cost time the first time round:
+
+- **Adding a *new* QML file needs `omarchy restart shell`, not just
+  `plugin update`.** Qt caches the plugin directory listing, so a file that
+  did not exist when the shell started is reported as
+  `File name case mismatch` — which has nothing to do with case. Editing an
+  existing file hot-reloads fine.
+- **The first collection after a cold boot can take 15s+.** Each `agy` call
+  spawns a 218 MB binary; steady state is ~4s. Don't conclude the service is
+  dead because the record hasn't appeared yet.
 
 ## Install (fresh machine)
 
