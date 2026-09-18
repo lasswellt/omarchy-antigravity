@@ -11,7 +11,7 @@
     "service"
   ],
   "entryPoints": {
-    "service": "Service.qml"
+    "service": "AntigravityService.qml"
   },
   "settings": {
     "defaults": {
