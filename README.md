@@ -1,20 +1,42 @@
-# Antigravity (Omarchy plugin) — stub
+# Antigravity (Omarchy plugin) — scaffold
 
-An early scaffold for an [Omarchy](https://omarchy.org) bar widget for
-Google Antigravity, modeled on the structure of
-[omarchy-tesla](https://github.com/nixfred/omarchy-tesla) (manifest,
-`Panel.qml`, `bin/` collector scripts, tests).
+An [Omarchy](https://omarchy.org) bar widget for Google Antigravity,
+modeled structurally on
+[omarchy-tesla](https://github.com/nixfred/omarchy-tesla) and on Omarchy's
+own built-in Agents bar plugin.
 
-Right now this only proves the plugin loads and shows a placeholder "AG"
-icon in the bar. No real data yet.
+**Read [`findings.md`](findings.md) first.** It has everything learned
+about where Antigravity keeps local state, what's actually readable
+without reverse engineering, and what is explicitly out of scope. This
+README is just structure and the dev loop.
 
-## Open questions before building the real thing
+## Status
 
-- Does Antigravity write any local session/usage state to disk, and where?
-- Is there a usage/rate-limit API comparable to Anthropic's OAuth usage
-  endpoint that Claude's collector reads, or is Antigravity local-only?
-- If neither exists, the widget may only ever be able to show
-  installed/running status, not real usage meters.
+- `Panel.qml` renders a placeholder "AG" bar icon. Not yet wired to real
+  data — that's the next step (see `findings.md`, "Next steps").
+- `bin/antigravity-usage` works today: it queries
+  `~/.gemini/antigravity/conversation_summaries.db` directly and prints a
+  JSON record (conversation counts, last-active time, recent conversations).
+  Run it directly to see current output:
+  ```bash
+  bin/antigravity-usage | jq .
+  ```
+- `tests/smoke` exercises that script against a fixture DB
+  (`tests/fixtures/conversation_summaries.sql`), never the user's real one.
+
+## Layout
+
+```
+manifest.json    plugin manifest (id lasswellt.antigravity)
+Panel.qml        bar widget entry point (placeholder content)
+bin/
+  antigravity-usage   reads conversation_summaries.db, prints JSON
+findings.md      research notes — read this first
+tests/
+  smoke                fixture-based test for bin/antigravity-usage
+  fixtures/
+    conversation_summaries.sql   fake rows, real schema
+```
 
 ## Dev loop
 
@@ -25,11 +47,16 @@ pulling from this repo (or its remote, once pushed).
 ```bash
 # after editing here
 cd ~/Projects/omarchy-antigravity
+tests/smoke                                      # run tests first
 git add -A && git commit -m "..."
-omarchy plugin update lasswellt.antigravity --yes
+omarchy plugin update lasswellt.antigravity --yes # pushes the change live
 ```
 
-## Install
+The running shell hot-reloads on `plugin update`; check
+`journalctl --user _PID=$(pgrep -x quickshell)` afterward for QML errors if
+the bar icon doesn't look right.
+
+## Install (fresh machine)
 
 ```bash
 omarchy plugin add ~/Projects/omarchy-antigravity --enable

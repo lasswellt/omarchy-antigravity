@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Smoke test for bin/antigravity-usage against a fixture DB. No network, no
+# real conversation content, never touches the user's actual ~/.gemini.
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+SCRIPT="$ROOT/bin/antigravity-usage"
+FIXTURE_SQL="$ROOT/tests/fixtures/conversation_summaries.sql"
+
+TEST_TMP=$(mktemp -d)
+trap 'rm -rf -- "$TEST_TMP"' EXIT
+
+fail() {
+  printf 'FAIL: %s\n' "$*" >&2
+  exit 1
+}
+
+# --- signed out / no db -----------------------------------------------------
+
+empty_dir="$TEST_TMP/empty"
+mkdir -p "$empty_dir"
+out=$(ANTIGRAVITY_GEMINI_DIR="$empty_dir" "$SCRIPT")
+signed_in=$(jq -r '.signedIn' <<<"$out")
+[[ $signed_in == "false" ]] || fail "expected signedIn=false with no db, got: $out"
+
+# --- populated fixture -------------------------------------------------------
+
+gemini_dir="$TEST_TMP/gemini"
+mkdir -p "$gemini_dir/antigravity"
+echo '{"active": "fixture@example.com", "old": []}' >"$gemini_dir/google_accounts.json"
+sqlite3 "$gemini_dir/antigravity/conversation_summaries.db" <"$FIXTURE_SQL"
+
+out=$(ANTIGRAVITY_GEMINI_DIR="$gemini_dir" "$SCRIPT")
+
+signed_in=$(jq -r '.signedIn' <<<"$out")
+[[ $signed_in == "true" ]] || fail "expected signedIn=true, got: $out"
+
+account=$(jq -r '.account' <<<"$out")
+[[ $account == "fixture@example.com" ]] || fail "expected fixture account, got: $account"
+
+total=$(jq -r '.conversations.total' <<<"$out")
+[[ $total == "4" ]] || fail "expected 4 total conversations, got: $total"
+
+today=$(jq -r '.conversations.today' <<<"$out")
+[[ $today == "2" ]] || fail "expected 2 conversations today, got: $today"
+
+last7=$(jq -r '.conversations.last7Days' <<<"$out")
+[[ $last7 == "3" ]] || fail "expected 3 conversations in the last 7 days, got: $last7"
+
+recent_count=$(jq -r '.recent | length' <<<"$out")
+[[ $recent_count == "4" ]] || fail "expected 4 recent rows (fixture has only 4), got: $recent_count"
+
+most_recent_title=$(jq -r '.recent[0].title' <<<"$out")
+[[ $most_recent_title == "Fix the build" ]] || fail "expected most recent conversation first, got: $most_recent_title"
+
+printf 'ok  all antigravity-usage smoke checks passed\n'

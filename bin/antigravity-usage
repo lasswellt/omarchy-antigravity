@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# antigravity-usage: print one JSON record describing local Antigravity
+# activity, for the bar widget to call. See ../findings.md for how this
+# data was found and what it does and doesn't cover.
+#
+# Antigravity keeps its real state under ~/.gemini (shared with the Gemini
+# CLI, not Antigravity-specific), not under ~/.config/Antigravity. The only
+# part of that state this script reads is conversation_summaries.db, a
+# plain SQLite table with no reverse engineering required. Token counts and
+# per-step cost live in protobuf blobs in the per-conversation databases
+# with no shipped schema; this script does not attempt to read those (see
+# findings.md, "Out of scope / avoid").
+#
+# ANTIGRAVITY_GEMINI_DIR overrides ~/.gemini, the same way Claude's
+# collector honors CLAUDE_CONFIG_DIR, so tests can point this at a fixture
+# directory instead of the real one.
+
+set -uo pipefail
+
+gemini_dir="${ANTIGRAVITY_GEMINI_DIR:-$HOME/.gemini}"
+accounts_file="$gemini_dir/google_accounts.json"
+db="$gemini_dir/antigravity/conversation_summaries.db"
+
+fail_json() {
+  jq -n --arg error "$1" '{signedIn: false, error: $error}'
+  exit 0
+}
+
+command -v sqlite3 >/dev/null || fail_json "sqlite3 not installed"
+command -v jq >/dev/null || { echo '{"signedIn": false, "error": "jq not installed"}'; exit 0; }
+
+account="null"
+if [[ -f $accounts_file ]]; then
+  account=$(jq -c '.active // null' "$accounts_file" 2>/dev/null) || account="null"
+fi
+
+[[ -f $db ]] || fail_json "no conversation_summaries.db found at $db"
+
+# All timestamps compared in UTC, 'now' taken once so the three counts are
+# consistent with each other even if the query takes a moment.
+now_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+rows_json=$(sqlite3 -json "$db" "
+  SELECT
+    conversation_id,
+    title,
+    step_count,
+    last_modified_time,
+    workspace_uris,
+    status,
+    agent_name
+  FROM conversation_summaries
+  ORDER BY last_modified_time DESC
+  LIMIT 5;
+" 2>/dev/null) || fail_json "failed to query $db"
+[[ -n $rows_json ]] || rows_json="[]"
+
+total=$(sqlite3 "$db" "SELECT count(*) FROM conversation_summaries;" 2>/dev/null || echo 0)
+today=$(sqlite3 "$db" "
+  SELECT count(*) FROM conversation_summaries
+  WHERE date(last_modified_time) = date('now');
+" 2>/dev/null || echo 0)
+last7=$(sqlite3 "$db" "
+  SELECT count(*) FROM conversation_summaries
+  WHERE julianday('now') - julianday(last_modified_time) <= 7;
+" 2>/dev/null || echo 0)
+last_active=$(sqlite3 "$db" "
+  SELECT last_modified_time FROM conversation_summaries
+  ORDER BY last_modified_time DESC LIMIT 1;
+" 2>/dev/null || echo "")
+
+jq -n \
+  --argjson account "$account" \
+  --argjson total "${total:-0}" \
+  --argjson today "${today:-0}" \
+  --argjson last7 "${last7:-0}" \
+  --arg lastActive "$last_active" \
+  --argjson recent "$rows_json" \
+  --arg generatedAt "$now_utc" \
+  '{
+    signedIn: ($account != null),
+    account: $account,
+    generatedAt: $generatedAt,
+    conversations: {
+      total: $total,
+      today: $today,
+      last7Days: $last7
+    },
+    lastActive: (if $lastActive == "" then null else $lastActive end),
+    recent: $recent
+  }'
