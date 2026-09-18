@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "lasswellt.antigravity",
+  "name": "Antigravity",
+  "version": "0.1.0",
+  "author": "Tom Lasswell",
+  "description": "Google Antigravity status in the Omarchy bar. Stub: no real data wired up yet.",
+  "homepage": "https://github.com/lasswellt/omarchy-antigravity",
+  "license": "MIT",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Antigravity",
+    "description": "Google Antigravity status in the Omarchy bar. Stub: no real data wired up yet.",
+    "category": "AI",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {},
+    "schema": []
+  }
+}
