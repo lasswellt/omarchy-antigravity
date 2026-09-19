@@ -1,0 +1,12 @@
+<!--
+  Light-surface twin of antigravity.svg (dark strokes). Same geometry; only the
+  stroke colour differs. See that file for why this is an original device
+  rather than Google's brand logo.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24"
+     fill="none" stroke="#1b1e20" stroke-width="1.7"
+     stroke-linecap="round" stroke-linejoin="round">
+  <ellipse cx="12" cy="18" rx="7.25" ry="2.75" opacity="0.55"/>
+  <path d="M12 14.5V4.25"/>
+  <path d="M8.4 7.85 12 4.25l3.6 3.6"/>
+</svg>

@@ -8,10 +8,22 @@
   "description": "Publishes Google Antigravity usage and limits to the Omarchy agents panel.",
   "homepage": "https://github.com/lasswellt/omarchy-antigravity",
   "kinds": [
-    "service"
+    "service",
+    "bar-widget"
   ],
   "entryPoints": {
-    "service": "AntigravityService.qml"
+    "service": "AntigravityService.qml",
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Antigravity",
+    "description": "Antigravity limits and local activity in a dedicated bar panel. Optional — the built-in Agents panel already shows this data.",
+    "category": "AI",
+    "aliases": ["antigravity", "agy"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {},
+    "schema": []
   },
   "settings": {
     "defaults": {

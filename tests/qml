@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# QML checks for the plugin's two entry points.
+#
+# qmllint cannot resolve Quickshell's `qs.*` modules without an import path
+# that actually contains a `qs` directory, so we build one in a temp dir
+# pointing at the shell install. (A symlink inside the plugin folder would be
+# refused by omarchy-plugin-validate.)
+#
+# Two categories of warning are unavoidable noise and are ignored:
+#
+#   missing-property          Style.font.* / Style.spacing.* live on a plain
+#                             QtObject, which qmllint cannot introspect.
+#   unqualified               referencing the root `id` from inside a nested
+#                             Component is the shell's own idiom; silencing it
+#                             would mean `pragma ComponentBehavior: Bound`.
+#   signal-handler-parameters qmllint cannot resolve QProcess::ExitStatus, so
+#                             every `onExited` handler trips it.
+#   unused-imports            informational.
+#
+# All of these appear in first-party plugins too (agents/Main.qml and
+# nightlight/Service.qml were the baseline). Anything *else* — a syntax error,
+# an unresolved type, a bad property — fails this test.
+set -uo pipefail
+
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+SHELL_DIR=${OMARCHY_SHELL_DIR:-/usr/share/omarchy/shell}
+
+QMLLINT=""
+for candidate in qmllint /usr/lib/qt6/bin/qmllint /usr/lib/qt/bin/qmllint; do
+  if command -v "$candidate" >/dev/null 2>&1; then QMLLINT="$candidate"; break; fi
+done
+
+if [[ -z $QMLLINT ]]; then
+  echo "skip  qmllint not installed; skipping QML checks" >&2
+  exit 0
+fi
+
+if [[ ! -d $SHELL_DIR ]]; then
+  echo "skip  no shell install at $SHELL_DIR; skipping QML checks" >&2
+  exit 0
+fi
+
+TEST_TMP=$(mktemp -d)
+trap 'rm -rf -- "$TEST_TMP"' EXIT
+mkdir -p "$TEST_TMP/mods"
+ln -sfn "$SHELL_DIR" "$TEST_TMP/mods/qs"
+
+ALLOWED='missing-property|unqualified|unused-imports|signal-handler-parameters'
+failures=0
+
+for qml in "$ROOT"/*.qml; do
+  name=$(basename "$qml")
+  output=$("$QMLLINT" -I "$TEST_TMP/mods" "$qml" 2>&1)
+
+  # Anything qmllint calls an Error is fatal regardless of category.
+  if grep -q '^Error:' <<<"$output"; then
+    printf 'FAIL: %s has qmllint errors\n' "$name" >&2
+    grep '^Error:' <<<"$output" | head -5 >&2
+    failures=$((failures + 1))
+    continue
+  fi
+
+  unexpected=$(grep -oE '\[[a-z-]+\]' <<<"$output" | sort -u | grep -vE "\[($ALLOWED)\]" || true)
+  if [[ -n $unexpected ]]; then
+    printf 'FAIL: %s has unexpected qmllint categories: %s\n' "$name" "$(tr '\n' ' ' <<<"$unexpected")" >&2
+    # -F: the categories carry literal [brackets], which grep -E reads as a
+    # character class ("Invalid range end" on anything containing a hyphen).
+    grep -F -f <(printf '%s\n' "$unexpected") <<<"$output" | head -8 >&2
+    failures=$((failures + 1))
+    continue
+  fi
+
+  printf 'ok  %s\n' "$name"
+done
+
+# The marks the panel falls back through must both exist and be real SVGs.
+for svg in antigravity.svg antigravity-light.svg; do
+  path="$ROOT/assets/$svg"
+  if [[ ! -f $path ]]; then
+    printf 'FAIL: missing asset %s\n' "$svg" >&2
+    failures=$((failures + 1))
+  elif ! grep -q '<svg' "$path"; then
+    printf 'FAIL: %s is not an SVG\n' "$svg" >&2
+    failures=$((failures + 1))
+  else
+    printf 'ok  assets/%s\n' "$svg"
+  fi
+done
+
+# Entry points in the manifest must exist, or the shell loads nothing and says
+# so only on its console. omarchy-plugin-validate checks this too; doing it
+# here keeps `tests/qml` honest on a machine without omarchy installed.
+while IFS= read -r ep; do
+  if [[ -f "$ROOT/$ep" ]]; then
+    printf 'ok  entry point %s\n' "$ep"
+  else
+    printf 'FAIL: entry point %s does not exist\n' "$ep" >&2
+    failures=$((failures + 1))
+  fi
+done < <(jq -r '.entryPoints | to_entries[] | .value' "$ROOT/manifest.json")
+
+if (( failures > 0 )); then
+  printf '\n%d QML check(s) failed\n' "$failures" >&2
+  exit 1
+fi
+printf 'ok  all QML checks passed\n'
