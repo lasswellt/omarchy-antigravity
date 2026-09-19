@@ -620,9 +620,11 @@ Either way it's derived from Antigravity's own state, and neither path reads
 
 ## 7. Suggested order
 
-**Steps 1–4 are done and running.** Antigravity appears in the built-in Agents
-panel next to Claude and Codex; the service has refreshed on its 900s timer
-continuously since 2026-09-18. What follows 4 is polish.
+**Steps 1–6 are done and running.** Antigravity appears in the built-in Agents
+panel next to Claude and Codex, the service has refreshed on its 900s timer
+continuously since 2026-09-18, and an optional bar widget gives it a dedicated
+icon and panel. Only the optional IDE path (7) is left, and it is unnecessary
+while the CLI is installed.
 
 - [x] 1. **Settle §0's open questions.** Decided: one merged `antigravity`
       record, because the quota is account-wide and two tabs would draw the
@@ -635,9 +637,16 @@ continuously since 2026-09-18. What follows 4 is polish.
 - [x] 4. **Published on a timer** — `AntigravityService.qml` runs
       `bin/antigravity-usage-update`; the plugin is a `service`, not a bar
       widget, since the Agents panel is the display.
-- [ ] 5. Standalone `Panel.qml` over the same record.
-- [ ] 6. Manifest polish, an SVG mark, docs (§5 checklist).
-- [ ] 7. *Optional:* the IDE path via §3's local RPC.
+- [x] 5. **Standalone `Panel.qml`** — optional bar widget over the same
+      record: four limit meters with reset countdowns, conversation counts,
+      a seven-day chart. Off by default; the Agents panel already shows this.
+- [x] 6. **Manifest, mark, docs, tests.** `assets/antigravity{,-light}.svg`
+      is an original device, not Google's logo. `tests/qml` covers both entry
+      points. The Agents panel still cannot show our mark — it resolves marks
+      only from its own root-owned assets directory, with no record-driven
+      path, so that one is closed as not fixable rather than done.
+- [ ] 7. *Optional, probably never:* the IDE path via §3's local RPC, for a
+      machine running the editor but not the CLI.
 
 <details>
 <summary>Original step detail, kept for the rebuild</summary>

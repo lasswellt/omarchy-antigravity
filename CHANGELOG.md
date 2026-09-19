@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.3.0 — 2026-09-18
+
+Adds the optional standalone bar widget, closing out the roadmap.
+
+### Added
+
+- `Panel.qml` — an optional bar widget: its own icon and a panel with the four
+  limit meters and reset countdowns, conversation counts, and a seven-day
+  chart with today bolded. It reads the published record rather than
+  collecting, so it cannot disagree with the Agents panel. Not in the default
+  layout; see the README for enabling it and hiding the duplicate Agents tab.
+- `assets/antigravity.svg` and `assets/antigravity-light.svg` — an original
+  mark (a mass rising off its plane), not Google's trademarked logo.
+- `tests/qml` — qmllint over both QML entry points against a temp import path
+  that maps Quickshell's `qs.*` modules, plus asset and entry-point existence.
+
+### Fixed
+
+- Panel bindings no longer read `record.todaySessions` before the first file
+  load. A child's bindings still evaluate while its enclosing item is
+  invisible, which logged three TypeErrors per draw.
+- Limit rows put percent and reset on one line, and the card is wider. On
+  separate rows the four limits pushed the newest day off the bottom of the
+  panel; raising the height cap did not help, because the panel sizes to its
+  content rather than to the cap.
+
+### Notes
+
+- The widget takes the `lasswellt.antigravity.panel` IPC target; the service
+  keeps the plain id, and two IpcHandlers cannot share one.
+
 ## 0.2.0 — 2026-09-18
 
 First working release. Antigravity now appears in Omarchy's built-in Agents
