@@ -620,11 +620,28 @@ Either way it's derived from Antigravity's own state, and neither path reads
 
 ## 7. Suggested order
 
-**There is no blocker left.** Everything below can be built today.
+**Steps 1–4 are done and running.** Antigravity appears in the built-in Agents
+panel next to Claude and Codex; the service has refreshed on its 900s timer
+continuously since 2026-09-18. What follows 4 is polish.
 
-1. **Settle §0's open questions** — cumulative vs per-run token stats, and
-   whether the IDE and CLI report as one agent or two. Both are decisions,
-   not unknowns.
+- [x] 1. **Settle §0's open questions.** Decided: one merged `antigravity`
+      record, because the quota is account-wide and two tabs would draw the
+      same limits twice. Token totals stay zero — `agy` reports usage per run
+      with no cumulative store, so `hasPromptStats: false` and step counts
+      carry the activity signal.
+- [x] 2. **Collector rewritten to the record contract** (`bin/antigravity-usage`).
+- [x] 3. **Tested** — 42 checks, fixtures plus a stubbed `agy`, including the
+      envelope guard. Mutation-tested to confirm the checks bite.
+- [x] 4. **Published on a timer** — `AntigravityService.qml` runs
+      `bin/antigravity-usage-update`; the plugin is a `service`, not a bar
+      widget, since the Agents panel is the display.
+- [ ] 5. Standalone `Panel.qml` over the same record.
+- [ ] 6. Manifest polish, an SVG mark, docs (§5 checklist).
+- [ ] 7. *Optional:* the IDE path via §3's local RPC.
+
+<details>
+<summary>Original step detail, kept for the rebuild</summary>
+
 2. **Rewrite `bin/antigravity-usage` to the §2 record contract**, sourcing:
    `agy -p "/usage"` → `limits[]` (percent = `1 - remaining_fraction`,
    label from group + bucket name, `resetsAt` from `reset_time`),
@@ -642,6 +659,27 @@ Either way it's derived from Antigravity's own state, and neither path reads
 7. *Optional, low priority:* extend to the IDE via §3's local RPC for machines
    that run the IDE but not the CLI. Decoding the conversation protos (§4) is
    now almost certainly never worth it.
+
+</details>
+
+### Traps found while wiring it up
+
+Both cost real time and are easy to hit again:
+
+- **A brand-new QML file needs `omarchy restart shell`, not just
+  `omarchy plugin update`.** Qt caches the plugin directory listing, so a file
+  that did not exist when the shell started is reported as
+  `File name case mismatch` — nothing to do with case. Editing an existing
+  file hot-reloads fine.
+- **`omarchy restart shell` refuses while the session is locked**, and says so
+  only on stderr. A locked session silently turns every restart into a no-op.
+- **The first collection after a cold boot can exceed 15s**, because each `agy`
+  call spawns a 218 MB binary. Steady state is ~4s. An absent record is not
+  proof the service is dead.
+- **Don't rewrite git history on a branch an installed plugin tracks.** The
+  installed copy is a real clone; a squashed commit it had already pulled
+  orphans its HEAD and breaks `plugin update` with "cannot fast-forward".
+  Recover with `git -C <plugin-dir> fetch && git reset --hard origin/master`.
 
 ## Appendix: how to redo the binary research
 
