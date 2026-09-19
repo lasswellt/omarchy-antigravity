@@ -601,8 +601,8 @@ files including `qml-syntax.test.ts` and `qml-resolve.test.ts`):
 
 `bin/antigravity-usage:33-35,81` derives `signedIn` from
 `~/.gemini/google_accounts.json`. That file is the **Gemini CLI's** active
-account. On this machine it reports `lasswellt@gmail.com` while the
-Antigravity language server logs "You are not logged into Antigravity" 91
+account. On this machine it reported a signed-in Google account while the
+Antigravity language server logged "You are not logged into Antigravity" 91
 times in the same session — so the collector claims signed-in for a signed-out
 IDE, and would keep doing so for a user who has only ever used the Gemini CLI.
 
